@@ -444,9 +444,10 @@ void showErrorScreen(uint8_t errorNumber) {
       display.clearBuffer();                                // Clear the display's internal memory.
       display.setFont(u8g2_font_ncenB14_tr);                 // Set the font for the error message.
       display.drawStr(15, 28, "ERROR 02");                   // Display error code "ERROR 02" at position (15, 28).
-      display.drawStr(16, 48, "Motor NOK");                  // Display "Motor NOK" indicating motor or sensor failure.
+      display.drawStr(5, 48, "No Rotation!");                // Display "No Rotation!" indicating a motor or sensor issue.
       display.sendBuffer();                                 // Update the display with the error message.
       break;
+
 
     case NO_ERROR:
       display.clearBuffer();                                // Clear the display's internal memory.
