@@ -11,11 +11,11 @@
 #include "Ds1302.h"           // Library to manage the DS1302 Real Time Clock (RTC) module
 
 // 🔧 Pin Configuration (define all connections between Arduino and components)
+const uint8_t HALL_PIN    = 2;    // Hall effect sensor input pin (counts motor rotations)
+
 const uint8_t DAT_PIN     = 3;     // RTC - Data pin
 const uint8_t CLK_PIN     = 4;     // RTC - Clock pin
 const uint8_t RST_PIN     = 5;     // RTC - Reset pin
-
-const uint8_t MOTOR_ON    = 11;     // Motor Relay control pin (also used to light a yellow LED)
 
 const uint8_t LED_RED     = 6;     // Red LED to indicate system error
 const uint8_t LED_GREEN   = 7;     // Green LED to indicate system OK
@@ -24,7 +24,8 @@ const uint8_t BTN_ENTER   = 8;     // Button to confirm actions (ENTER)
 const uint8_t BTN_PLUS    = 9;     // Button to increase values or navigate (PLUS)
 const uint8_t BTN_MINUS   = 10;    // Button to decrease values or navigate (MINUS)
 
-const uint8_t HALL_PIN    = 2;    // Hall effect sensor input pin (counts motor rotations)
+const uint8_t MOTOR_ON    = 11;     // Motor Relay control pin (also used to light a yellow LED)
+
 const uint8_t BTN_BACK    = 12;    // Button to go back or cancel actions (BACK)
 
 // 🎯 Screen Identifiers (used to control which screen to display on the OLED)
@@ -70,9 +71,9 @@ uint8_t errorType = NO_ERROR;             // Stores the current error type (no e
 // 🐟 Feeding Schedule Definition
 // Each row defines: [hour, minute, doses, active (1/0), alreadyFed (1/0)]
 uint8_t setPoint[3][5] = {
-  {06, 32, 1, 1, 0},                      // Feed at 06:32, 1 dose, active, not yet fed today
-  {06, 35, 2, 1, 0},                      // Feed at 06:35, 2 dose, active, not yet fed today
-  {06, 38, 1, 0, 0}                       // Feed at 06:38, 1 dose, inactive, not yet fed today
+  {8, 13, 1, 1, 0},                      // Feed at 08:13, 1 dose, active, not yet fed today
+  {8, 14, 2, 1, 0},                      // Feed at 08:14, 2 dose, active, not yet fed today
+  {8, 15, 1, 0, 0}                       // Feed at 08:15, 1 dose, inactive, not yet fed today
 };
 
 
@@ -293,7 +294,8 @@ void resetFeedingFlags();                      // Resets daily feeding status at
 void checkManualMode();                        // Detects manual feeding button combination
 void countPulse();                             // Interrupt service routine to count pulses from the Hall sensor
 void checkMotorError();                        // Verifies if the motor is running correctly
-void CheckTurn();
+void checkRotationDone();                      // Checks if the motor has reached the target number of pulses for a full rotation
+
 
 
 // 🛠 Setup Function (Runs once when the Arduino starts)
@@ -307,7 +309,7 @@ void setup() {
   pinMode(MOTOR_ON, OUTPUT);                     // Set Motor control pin (relay + yellow LED) as OUTPUT
 
   // Ensure all outputs start OFF
-  digitalWrite(LED_GREEN, HIGH);                  // Turn On Green LED
+  digitalWrite(LED_GREEN, HIGH);                 // Turn On Green LED
   digitalWrite(LED_RED, LOW);                    // Turn off Red LED
   digitalWrite(MOTOR_ON, LOW);                   // Turn off Motor (relay and yellow LED)
 
@@ -330,36 +332,40 @@ void setup() {
 }
 
 
-// 🔁 Main Loop
-// This is the main execution cycle that runs continuously while the Arduino is powered on.
-// It manages system health checks, feeding schedules, user interactions, and display updates.
+// 🔄 Main Loop (Runs continuously after setup)
 //
-// ✅ Logical Flow:
-// 1. Always check RTC health (to detect communication loss or freezing).
-// 2. Allow manual feeding even if RTC fails, but block if motor error is detected.
-// 3. Only proceed with automated feeding and screen management if no screen-level error is active.
-// 4. Continuously update the display to reflect the system state.
+// This is the continuous execution cycle responsible for:
+// - Checking system health (RTC and Motor)
+// - Managing feeding schedules (automatic and manual)
+// - Handling screen updates
+// - Ensuring safe motor operation, even in degraded system states
 
 void loop() {
-  checkRTC();  // 🧠 Always check RTC to ensure the system clock is updating.
+  checkRTC();  // 🧠 Always check and update the RTC status to ensure the clock is running correctly.
 
-  if (errorType != MOTOR_ERROR) {            // 🚧 Allow manual feeding even if RTC fails, but block if motor is faulty.
-    checkManualMode();                       // ✋ Check for manual feeding request.
+  // 🚧 If the motor is healthy (no MOTOR_ERROR), allow the user to trigger manual feeding.
+  // This allows manual operation even if the RTC fails.
+  if (errorType != MOTOR_ERROR) {
+    checkManualMode();  // ✋ Listen for manual feeding button press.
   }
 
-  if (screenNumber != SCREEN_ERROR) {        // ✅ Only continue system logic if no critical error screen is shown.
-    screenSaver();                           // 🖥️ Manage screensaver transitions between logo and clock.
-    checkFeedingTime();                      // 🍽️ Check if scheduled feeding should start.
-    resetFeedingFlags();                     // ♻️ Reset daily flags when a new day begins.
-
-    if (motorActive) {                       // 🛠️ If motor is running, ensure the pulses are being counted.
-      checkMotorError();                     // ⚠️ Detect motor stalls or sensor failures.
-      CheckTurn();
-    }
+  // ✅ Proceed with scheduled operations and screensaver only if no critical error screen is active.
+  if (screenNumber != SCREEN_ERROR) {
+    screenSaver();        // 🖥️ Handle logo and clock screen transitions (screensaver).
+    checkFeedingTime();   // 🍽️ Check if it’s time to trigger a scheduled automatic feeding.
+    resetFeedingFlags();  // ♻️ Reset daily feeding status at midnight.
   }
 
-  updateScreen();                            // 📺 Always update the display based on the current state.
+  // 🛠️ Always monitor motor behavior while it's running, even if the RTC has failed or an error screen is showing.
+  // This ensures safe stopping or completion of motor actions.
+  if (motorActive) {
+    checkMotorError();     // ⚠️ Monitor motor pulses to detect jams or failures.
+    checkRotationDone();   // 🔄 Verify if the motor has completed the required rotation (pulse target reached).
+  }
+
+  updateScreen();  // 📺 Always refresh the display to reflect the latest system status.
 }
+
 
 
 
@@ -438,7 +444,7 @@ void showErrorScreen(uint8_t errorNumber) {
       display.clearBuffer();                                // Clear the display's internal memory.
       display.setFont(u8g2_font_ncenB14_tr);                 // Set the font for the error message.
       display.drawStr(15, 28, "ERROR 02");                   // Display error code "ERROR 02" at position (15, 28).
-      display.drawStr(17, 48, "Motor NOK");                  // Display "Motor NOK" indicating motor or sensor failure.
+      display.drawStr(16, 48, "Motor NOK");                  // Display "Motor NOK" indicating motor or sensor failure.
       display.sendBuffer();                                 // Update the display with the error message.
       break;
 
@@ -463,36 +469,44 @@ void showErrorScreen(uint8_t errorNumber) {
 
 // 🧠 Check RTC Health
 // This function verifies if the RTC (Real-Time Clock) is updating correctly.
-// It checks every second if the 'seconds' value has changed.
-// If the RTC stops updating, it signals an error by changing LEDs and the screen.
+// It checks once per second if the 'seconds' value has changed.
+// If the RTC stops updating, it triggers an RTC error and shows the error screen.
+// If the RTC recovers, it clears the RTC error *only if the motor is not in error*.
 void checkRTC() {
-  static unsigned long lastCheck = 0;   // Stores the timestamp of the last check.
-  static uint8_t lastSecond = 255;      // Initialize with an impossible second value (255) to force the first update.
+  static unsigned long lastCheck = 0;   // Timestamp of the last RTC check.
+  static uint8_t lastSecond = 255;      // Stores the last detected second (initialized to force first read).
 
-  if (millis() - lastCheck >= 1000) {   // Check every 1000 ms (1 second).
-    lastCheck = millis();               // Update the timestamp.
-    rtc.getDateTime(&now);              // Read the current date and time from the RTC module.
+  if (millis() - lastCheck >= 1000) {   // Perform the check every 1000 ms (1 second).
+    lastCheck = millis();               // Update the check timestamp.
+    rtc.getDateTime(&now);              // Read the current date and time from the RTC.
 
-    if (now.second != lastSecond) {     // If seconds have changed since the last check, RTC is updating correctly.
-      lastSecond = now.second;          // Update the last known second.
-      if (errorType == MOTOR_ERROR){
+    if (now.second != lastSecond) {     // RTC is updating (second has changed).
+      lastSecond = now.second;          // Store the new second value.
+
+      // 🟢 If the motor had no error, clear RTC error and return to normal.
+      if (errorType == MOTOR_ERROR) {
+        // Do nothing, keep the MOTOR_ERROR active as priority.
         errorType = MOTOR_ERROR;
-      }else{
-        errorType = NO_ERROR;
+      } else {
+        errorType = NO_ERROR;           // Clear RTC error.
       }
-      if (screenNumber == SCREEN_ERROR && errorType == NO_ERROR){
-        screenNumber = SCREEN_LOGO;
-        digitalWrite(LED_GREEN, HIGH);    // Turn ON the Green LED to indicate normal operation.
-        digitalWrite(LED_RED, LOW);       // Turn OFF the Red LED (no error).
-      }                                   // Only return to logo if currently showing error.
-    } else {                            // If seconds have not changed, RTC might be frozen.
-      digitalWrite(LED_GREEN, LOW);     // Turn OFF the Green LED (system not OK).
-      digitalWrite(LED_RED, HIGH);      // Turn ON the Red LED to signal an error.
-      screenNumber = SCREEN_ERROR;      // Switch to the Error screen.
-      errorType = RTC_ERROR;            // Set error type to RTC Error.
+
+      // ✅ If the error screen is being shown and the system is back to normal, restore the logo screen.
+      if (screenNumber == SCREEN_ERROR && errorType == NO_ERROR) {
+        screenNumber = SCREEN_LOGO;     // Go back to the logo screen.
+        digitalWrite(LED_GREEN, HIGH);  // Turn ON the Green LED (system OK).
+        digitalWrite(LED_RED, LOW);     // Turn OFF the Red LED (no error).
+      }
+
+    } else {                            // RTC did not update (stuck or not communicating).
+      digitalWrite(LED_GREEN, LOW);     // Turn OFF the Green LED (not OK).
+      digitalWrite(LED_RED, HIGH);      // Turn ON the Red LED (error).
+      screenNumber = SCREEN_ERROR;      // Display the error screen.
+      errorType = RTC_ERROR;            // Mark the error as RTC failure.
     }
   }
 }
+
 
 
 
@@ -605,64 +619,65 @@ void checkManualMode() {
   }
 }
 
-
 // 📈 Pulse Counting Handler
-// This function counts pulses from the Hall sensor during motor operation.
+// This interrupt function is triggered on every rising edge detected by the Hall sensor.
+// It simply increments the pulse counter to track motor rotation.
+// ⚠️ Keep this function short and efficient to avoid timing issues.
 void countPulse() {
   pulseCount++;
 }
 
-void CheckTurn(){
-  if (pulseCount >= pulseTarget) {  // Stop when target pulses are reached.
-    digitalWrite(MOTOR_ON, LOW);    // Stop the motor (and yellow LED).
-    manualActive = false;           // Reset manual active flag.
-    motorActive = false;            // Reset motor active flag.
-    manualRequest = false;          // Clear manual request state.
-    pulseCount = 0;                 // Reset pulse counter.
-    screenNumber = SCREEN_LOGO;     // Return to logo screen.
-    manualPressTime = 0;            // Reset button press timer.
+// 🔄 Rotation Completion Check
+// This function verifies if the motor has completed the required rotation by checking the pulse count.
+// When the target pulse count is reached, it stops the motor and resets related states.
+void checkRotationDone() {
+  if (pulseCount >= pulseTarget) {       // ✅ Stop when the target number of pulses is reached.
+    digitalWrite(MOTOR_ON, LOW);         // 🛑 Stop the motor (and the yellow LED).
+    manualActive = false;                // 🔄 Reset manual feeding flag.
+    motorActive = false;                 // 🔄 Reset automatic feeding flag.
+    manualRequest = false;               // 🔄 Clear manual feeding request.
+    pulseCount = 0;                      // 🔄 Reset the pulse counter for the next operation.
+    screenNumber = SCREEN_LOGO;          // 🖥️ Return to the logo screen.
+    manualPressTime = 0;                 // 🔄 Reset manual button press tracking.
   }
 }
 
-// ⚠️ Motor Error Monitoring (Improved Version)
-// This function checks if the motor is running but no new pulses are detected for over 1 second,
-// indicating a possible jam or malfunction. The timer resets whenever new pulses are detected.
+// ⚠️ Motor Error Monitoring (Stall Detection)
+// This function monitors the motor while running to ensure pulses are being received.
+// If no new pulses are detected for more than 2 seconds, it assumes a stall or malfunction and stops the motor.
 void checkMotorError() {
-  static unsigned long motorErrorTimerStart = 0;
+  static unsigned long motorErrorTimerStart = 0;  // Records when the motor started for timing the error check.
 
-  if (digitalRead(MOTOR_ON) == HIGH) {
+  if (digitalRead(MOTOR_ON) == HIGH) {  // 🟢 Motor is running.
     if (motorErrorTimerStart == 0) {
-      motorErrorTimerStart = millis();
-      lastPulseSnapshot = pulseCount;
+      motorErrorTimerStart = millis();       // 🕒 Start timing when motor starts.
+      lastPulseSnapshot = pulseCount;        // 📊 Record the current pulse count as reference.
     }
 
-    // 🟢 Reset timer if new pulses are detected (motor is rotating normally).
+    // 🟢 Reset timer if new pulses are detected (motor is rotating correctly).
     if (pulseCount != lastPulseSnapshot) {
-      motorErrorTimerStart = millis();
-      lastPulseSnapshot = pulseCount;
+      motorErrorTimerStart = millis();       // 🕒 Reset the timer.
+      lastPulseSnapshot = pulseCount;        // 📊 Update pulse snapshot.
     }
 
-    // ⚠️ Trigger error if no pulses detected for over 3 seconds.
+    // ⚠️ If no pulses are detected for more than 2 seconds, trigger error.
     if (millis() - motorErrorTimerStart > 2000) {
-      errorType = MOTOR_ERROR;
-      digitalWrite(MOTOR_ON, LOW);
-      screenNumber = SCREEN_ERROR;
-      digitalWrite(LED_GREEN, LOW);
-      digitalWrite(LED_RED, HIGH);
-      motorActive = false;
-      manualRequest = false;
-      manualActive = false;
+      errorType = MOTOR_ERROR;               // 🚨 Set motor error state.
+      digitalWrite(MOTOR_ON, LOW);           // 🛑 Stop the motor.
+      screenNumber = SCREEN_ERROR;           // 📺 Show error screen.
+      digitalWrite(LED_GREEN, LOW);          // 🔴 Turn off green LED.
+      digitalWrite(LED_RED, HIGH);           // 🔴 Turn on red LED.
+      motorActive = false;                   // 🔄 Clear motor active flag.
+      manualRequest = false;                 // 🔄 Clear manual request flag.
+      manualActive = false;                  // 🔄 Clear manual active flag.
     }
 
   } else if (digitalRead(MOTOR_ON) == LOW && errorType == NO_ERROR) {
+    // 🔄 Reset timer and LEDs if motor is off and no error is present.
     motorErrorTimerStart = 0;
     errorType = NO_ERROR;
-    screenNumber = SCREEN_LOGO;
-    digitalWrite(LED_GREEN, HIGH);
-    digitalWrite(LED_RED, LOW);
+    screenNumber = SCREEN_LOGO;              // 🖥️ Return to logo screen.
+    digitalWrite(LED_GREEN, HIGH);           // 🟢 Green LED ON (system OK).
+    digitalWrite(LED_RED, LOW);              // 🔴 Red LED OFF.
   }
 }
-
-
-
-
