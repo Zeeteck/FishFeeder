@@ -1,7 +1,7 @@
 /*****************************************************************************/
 /* Fish Feeder - Project by Carlos Filipe ZeeTeck                            */
 /* Version: 1.5                                                              */
-/* Last Update: 07/05/2025                                                   */
+/* Last Update: 09/05/2025                                                   */
 /* Hardware: Arduino Uno R3                                                  */
 /*****************************************************************************/
 
@@ -11,11 +11,11 @@
 #include "Ds1302.h"           // Library to manage the DS1302 Real Time Clock (RTC) module
 
 // 🔧 Pin Configuration (define all connections between Arduino and components)
-const uint8_t RST_PIN     = 2;     // RTC - Reset pin
 const uint8_t DAT_PIN     = 3;     // RTC - Data pin
 const uint8_t CLK_PIN     = 4;     // RTC - Clock pin
+const uint8_t RST_PIN     = 5;     // RTC - Reset pin
 
-const uint8_t MOTOR_ON    = 5;     // Motor Relay control pin (also used to light a yellow LED)
+const uint8_t MOTOR_ON    = 11;     // Motor Relay control pin (also used to light a yellow LED)
 
 const uint8_t LED_RED     = 6;     // Red LED to indicate system error
 const uint8_t LED_GREEN   = 7;     // Green LED to indicate system OK
@@ -24,7 +24,7 @@ const uint8_t BTN_ENTER   = 8;     // Button to confirm actions (ENTER)
 const uint8_t BTN_PLUS    = 9;     // Button to increase values or navigate (PLUS)
 const uint8_t BTN_MINUS   = 10;    // Button to decrease values or navigate (MINUS)
 
-const uint8_t HALL_PIN    = 11;    // Hall effect sensor input pin (counts motor rotations)
+const uint8_t HALL_PIN    = 2;    // Hall effect sensor input pin (counts motor rotations)
 const uint8_t BTN_BACK    = 12;    // Button to go back or cancel actions (BACK)
 
 // 🎯 Screen Identifiers (used to control which screen to display on the OLED)
@@ -70,9 +70,9 @@ uint8_t errorType = NO_ERROR;             // Stores the current error type (no e
 // 🐟 Feeding Schedule Definition
 // Each row defines: [hour, minute, doses, active (1/0), alreadyFed (1/0)]
 uint8_t setPoint[3][5] = {
-  {21, 56, 1, 1, 0},                      // Feed at 21:56, 1 dose, active, not yet fed today
-  {21, 57, 1, 1, 0},                      // Feed at 21:57, 1 dose, active, not yet fed today
-  {21, 58, 1, 0, 0}                       // Feed at 21:58, 1 dose, inactive, not yet fed today
+  {06, 32, 1, 1, 0},                      // Feed at 06:32, 1 dose, active, not yet fed today
+  {06, 35, 2, 1, 0},                      // Feed at 06:35, 2 dose, active, not yet fed today
+  {06, 38, 1, 0, 0}                       // Feed at 06:38, 1 dose, inactive, not yet fed today
 };
 
 
@@ -293,6 +293,7 @@ void resetFeedingFlags();                      // Resets daily feeding status at
 void checkManualMode();                        // Detects manual feeding button combination
 void countPulse();                             // Interrupt service routine to count pulses from the Hall sensor
 void checkMotorError();                        // Verifies if the motor is running correctly
+void CheckTurn();
 
 
 // 🛠 Setup Function (Runs once when the Arduino starts)
@@ -306,7 +307,7 @@ void setup() {
   pinMode(MOTOR_ON, OUTPUT);                     // Set Motor control pin (relay + yellow LED) as OUTPUT
 
   // Ensure all outputs start OFF
-  digitalWrite(LED_GREEN, LOW);                  // Turn off Green LED
+  digitalWrite(LED_GREEN, HIGH);                  // Turn On Green LED
   digitalWrite(LED_RED, LOW);                    // Turn off Red LED
   digitalWrite(MOTOR_ON, LOW);                   // Turn off Motor (relay and yellow LED)
 
@@ -317,7 +318,7 @@ void setup() {
   pinMode(BTN_BACK, INPUT_PULLUP);               // Back button (return to previous screen)
 
   // Configure Hall effect sensor input (no pull-up as it's external hardware controlled)
-  pinMode(HALL_PIN, INPUT);                      // Hall sensor for detecting rotations (motor feedback)
+  pinMode(HALL_PIN, INPUT_PULLUP);                      // Hall sensor for detecting rotations (motor feedback)
 
   // Attach an interrupt to the Hall sensor
   // Every time the sensor detects a rising edge (LOW to HIGH transition), 
@@ -353,6 +354,7 @@ void loop() {
 
     if (motorActive) {                       // 🛠️ If motor is running, ensure the pulses are being counted.
       checkMotorError();                     // ⚠️ Detect motor stalls or sensor failures.
+      CheckTurn();
     }
   }
 
@@ -473,9 +475,16 @@ void checkRTC() {
 
     if (now.second != lastSecond) {     // If seconds have changed since the last check, RTC is updating correctly.
       lastSecond = now.second;          // Update the last known second.
-      digitalWrite(LED_GREEN, HIGH);    // Turn ON the Green LED to indicate normal operation.
-      digitalWrite(LED_RED, LOW);       // Turn OFF the Red LED (no error).
-      if (screenNumber == SCREEN_ERROR) screenNumber = SCREEN_LOGO;  // Only return to logo if currently showing error.
+      if (errorType == MOTOR_ERROR){
+        errorType = MOTOR_ERROR;
+      }else{
+        errorType = NO_ERROR;
+      }
+      if (screenNumber == SCREEN_ERROR && errorType == NO_ERROR){
+        screenNumber = SCREEN_LOGO;
+        digitalWrite(LED_GREEN, HIGH);    // Turn ON the Green LED to indicate normal operation.
+        digitalWrite(LED_RED, LOW);       // Turn OFF the Red LED (no error).
+      }                                   // Only return to logo if currently showing error.
     } else {                            // If seconds have not changed, RTC might be frozen.
       digitalWrite(LED_GREEN, LOW);     // Turn OFF the Green LED (system not OK).
       digitalWrite(LED_RED, HIGH);      // Turn ON the Red LED to signal an error.
@@ -599,58 +608,61 @@ void checkManualMode() {
 
 // 📈 Pulse Counting Handler
 // This function counts pulses from the Hall sensor during motor operation.
-// When the target is reached, it stops the motor and resets states.
 void countPulse() {
-  if (motorActive) {  // Only count if the motor is running.
-    pulseCount++;     // Increase pulse count with each sensor signal.
-
-    if (pulseCount >= pulseTarget) {  // Stop when target pulses are reached.
-      digitalWrite(MOTOR_ON, LOW);    // Stop the motor (and yellow LED).
-      manualActive = false;           // Reset manual active flag.
-      motorActive = false;            // Reset motor active flag.
-      manualRequest = false;          // Clear manual request state.
-      pulseCount = 0;                 // Reset pulse counter.
-      screenNumber = SCREEN_LOGO;     // Return to logo screen.
-      manualPressTime = 0;            // Reset button press timer.
-    }
-  }
+  pulseCount++;
 }
 
+void CheckTurn(){
+  if (pulseCount >= pulseTarget) {  // Stop when target pulses are reached.
+    digitalWrite(MOTOR_ON, LOW);    // Stop the motor (and yellow LED).
+    manualActive = false;           // Reset manual active flag.
+    motorActive = false;            // Reset motor active flag.
+    manualRequest = false;          // Clear manual request state.
+    pulseCount = 0;                 // Reset pulse counter.
+    screenNumber = SCREEN_LOGO;     // Return to logo screen.
+    manualPressTime = 0;            // Reset button press timer.
+  }
+}
 
 // ⚠️ Motor Error Monitoring (Improved Version)
 // This function checks if the motor is running but no new pulses are detected for over 1 second,
 // indicating a possible jam or malfunction. The timer resets whenever new pulses are detected.
 void checkMotorError() {
-  static unsigned long motorErrorTimerStart = 0;  // Records when the motor started for error timing.
+  static unsigned long motorErrorTimerStart = 0;
 
-  if (digitalRead(MOTOR_ON) == HIGH) {  // If the motor is running:
-
+  if (digitalRead(MOTOR_ON) == HIGH) {
     if (motorErrorTimerStart == 0) {
-      motorErrorTimerStart = millis();  // Initialize timer if not already started.
+      motorErrorTimerStart = millis();
+      lastPulseSnapshot = pulseCount;
     }
 
     // 🟢 Reset timer if new pulses are detected (motor is rotating normally).
     if (pulseCount != lastPulseSnapshot) {
-      motorErrorTimerStart = millis();         // Reset the error timer.
-      lastPulseSnapshot = pulseCount;          // Update the pulse snapshot for future comparison.
+      motorErrorTimerStart = millis();
+      lastPulseSnapshot = pulseCount;
     }
 
-    // ⚠️ Trigger error if no pulses detected for over 1 second.
-    if (millis() - motorErrorTimerStart > 1000) {
-      errorType = MOTOR_ERROR;                 // Set motor error.
-      digitalWrite(MOTOR_ON, LOW);             // Stop the motor.
-      screenNumber = SCREEN_ERROR;             // Switch to error screen.
-      motorActive = false;                     // Clear motor active state.
-      manualRequest = false;                   // Clear manual request.
-      manualActive = false;                    // Clear manual active state.
+    // ⚠️ Trigger error if no pulses detected for over 3 seconds.
+    if (millis() - motorErrorTimerStart > 2000) {
+      errorType = MOTOR_ERROR;
+      digitalWrite(MOTOR_ON, LOW);
+      screenNumber = SCREEN_ERROR;
+      digitalWrite(LED_GREEN, LOW);
+      digitalWrite(LED_RED, HIGH);
+      motorActive = false;
+      manualRequest = false;
+      manualActive = false;
     }
 
-  } else {
-    motorErrorTimerStart = 0;                  // Reset timer when motor is off.
-    errorType = NO_ERROR;                      // Clear error state.
-    screenNumber = SCREEN_LOGO;                // Return to logo screen.
+  } else if (digitalRead(MOTOR_ON) == LOW && errorType == NO_ERROR) {
+    motorErrorTimerStart = 0;
+    errorType = NO_ERROR;
+    screenNumber = SCREEN_LOGO;
+    digitalWrite(LED_GREEN, HIGH);
+    digitalWrite(LED_RED, LOW);
   }
 }
+
 
 
 
